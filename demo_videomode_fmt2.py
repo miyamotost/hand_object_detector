@@ -22,6 +22,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from PIL import Image
+import pickle
+import pandas as pd
 
 import torchvision.transforms as transforms
 import torchvision.datasets as dset
@@ -34,6 +36,7 @@ from model.rpn.bbox_transform import clip_boxes
 from model.roi_layers import nms
 from model.rpn.bbox_transform import bbox_transform_inv
 from model.utils.net_utils import save_net, load_net, vis_detections, vis_detections_PIL, vis_detections_filtered_objects_PIL, vis_detections_filtered_objects # (1) here add a function to viz
+from model.utils.net_utils_fmt2 import vis_detections_filtered_objects_PIL_custom
 from model.utils.blob import im_list_to_blob
 from model.faster_rcnn.vgg16 import vgg16
 from model.faster_rcnn.resnet import resnet
@@ -65,12 +68,14 @@ def parse_args():
   parser.add_argument('--load_dir', dest='load_dir',
                       help='directory to load models',
                       default="models")
-  parser.add_argument('--image_dir', dest='image_dir',
-                      help='directory to load images for demo',
-                      default="images")
   parser.add_argument('--save_dir', dest='save_dir',
                       help='directory to save results',
                       default="images_det")
+  parser.add_argument('--dataset_dir', dest='dataset_dir',
+                      help='directory to load images for demo',
+                      default="images")
+  parser.add_argument('--pred_dir', required=True)
+  parser.add_argument('--label_dir', required=True)
   parser.add_argument('--cuda', dest='cuda',
                       help='whether use CUDA',
                       action='store_true')
@@ -107,6 +112,8 @@ def parse_args():
   parser.add_argument('--thresh_obj', default=0.5,
                       type=float,
                       required=False)
+  parser.add_argument('--analysis', action='store_true')
+  parser.add_argument('--show_state', action='store_true', default=False)
 
   args = parser.parse_args()
   return args
@@ -149,76 +156,10 @@ def _get_image_blob(im):
 
   return blob, np.array(im_scale_factors)
 
-if __name__ == '__main__':
-
-  args = parse_args()
-
-  # print('Called with args:')
-  # print(args)
-
-  if args.cfg_file is not None:
-    cfg_from_file(args.cfg_file)
-  if args.set_cfgs is not None:
-    cfg_from_list(args.set_cfgs)
-
-  cfg.USE_GPU_NMS = args.cuda
-  np.random.seed(cfg.RNG_SEED)
-
-  # load model
-  model_dir = args.load_dir + "/" + args.net + "_handobj_100K" + "/" + args.dataset
-  if not os.path.exists(model_dir):
-    raise Exception('There is no input directory for loading network from ' + model_dir)
-  load_name = os.path.join(model_dir, 'faster_rcnn_{}_{}_{}.pth'.format(args.checksession, args.checkepoch, args.checkpoint))
-
-  pascal_classes = np.asarray(['__background__', 'targetobject', 'hand'])
-  args.set_cfgs = ['ANCHOR_SCALES', '[8, 16, 32, 64]', 'ANCHOR_RATIOS', '[0.5, 1, 2]']
-
-  # initilize the network here.
-  if args.net == 'vgg16':
-    fasterRCNN = vgg16(pascal_classes, pretrained=False, class_agnostic=args.class_agnostic)
-  elif args.net == 'res101':
-    fasterRCNN = resnet(pascal_classes, 101, pretrained=False, class_agnostic=args.class_agnostic)
-  elif args.net == 'res50':
-    fasterRCNN = resnet(pascal_classes, 50, pretrained=False, class_agnostic=args.class_agnostic)
-  elif args.net == 'res152':
-    fasterRCNN = resnet(pascal_classes, 152, pretrained=False, class_agnostic=args.class_agnostic)
-  else:
-    print("network is not defined")
-    pdb.set_trace()
-
-  fasterRCNN.create_architecture()
-
-  print("load checkpoint %s" % (load_name))
-  if args.cuda > 0:
-    checkpoint = torch.load(load_name)
-  else:
-    checkpoint = torch.load(load_name, map_location=(lambda storage, loc: storage))
-  fasterRCNN.load_state_dict(checkpoint['model'])
-  if 'pooling_mode' in checkpoint.keys():
-    cfg.POOLING_MODE = checkpoint['pooling_mode']
-
-  print('load model successfully!')
-
-
-  # initilize the tensor holder here.
-  im_data = torch.FloatTensor(1)
-  im_info = torch.FloatTensor(1)
-  num_boxes = torch.LongTensor(1)
-  gt_boxes = torch.FloatTensor(1)
-  box_info = torch.FloatTensor(1)
-
-  # ship to cuda
-  if args.cuda > 0:
-    im_data = im_data.cuda()
-    im_info = im_info.cuda()
-    num_boxes = num_boxes.cuda()
-    gt_boxes = gt_boxes.cuda()
-
+def predict(dataset_dir, pred_path, pred_dir_file, start_frame, stop_frame, video_id):
   with torch.no_grad():
     if args.cuda > 0:
       cfg.CUDA = True
-
-    if args.cuda > 0:
       fasterRCNN.cuda()
 
     fasterRCNN.eval()
@@ -238,15 +179,35 @@ if __name__ == '__main__':
       cap = cv2.VideoCapture(webcam_num)
       num_images = 0
     else:
-      print(f'image dir = {args.image_dir}')
-      print(f'save dir = {args.save_dir}')
-      imglist = os.listdir(args.image_dir)
+      if args.show_state:
+          print(f'image dir = {dataset_dir}')
+          print(f'save dir = {args.save_dir}')
+
+
+      if os.path.exists(dataset_dir):
+          print('Processing {}'.format(pred_dir_file))
+      else:
+          print('Not exist {}'.format(video_id))
+          return
+
+      imglist = os.listdir(dataset_dir)
+      tmp = []
+      for img in imglist:
+        index = img
+        index = index.replace('frame_', '').replace('.jpg', '')
+        index = int(index)
+        if start_frame <= index <= stop_frame:
+          tmp.append(img)
+      tmp.sort()
+      imglist = tmp
       num_images = len(imglist)
 
-    print('Loaded Photo: {} images.'.format(num_images))
+    if args.show_state:
+        print('Loaded Photo: {} images.'.format(num_images))
 
     cnt = 0
-    while (num_images >= 0):
+    while (num_images >= 1):
+        frame_index = imglist[cnt]
         cnt += 1
         total_tic = time.time()
         if webcam_num == -1:
@@ -260,9 +221,8 @@ if __name__ == '__main__':
           im_in = np.array(frame)
         # Load the demo image
         else:
-          im_file = os.path.join(args.image_dir, imglist[num_images])
+          im_file = os.path.join(dataset_dir, imglist[num_images])
           im_in = cv2.imread(im_file)
-          print('Processing {}th image: {}.'.format(cnt, im_file))
         # bgr
         im = im_in
 
@@ -370,21 +330,32 @@ if __name__ == '__main__':
               if pascal_classes[j] == 'hand':
                 hand_dets = cls_dets.cpu().numpy()
 
+        """
+        if args.analysis:
+          if obj_dets is not None:
+             print('obj_dets', obj_dets.shape)
+             #print(obj_dets)
+          if hand_dets is not None:
+             print('hand_dets', hand_dets.shape)
+             #print(hand_dets)
+        """
+
+        # create base of mask image
+        im2show = np.zeros(im2show.shape)
+        im2show = im2show.astype(np.uint8)
+
         if vis:
           # visualization
-          im2show = vis_detections_filtered_objects_PIL(im2show, obj_dets, hand_dets, thresh_hand, thresh_obj)
+          im2show = vis_detections_filtered_objects_PIL_custom(im2show, obj_dets, hand_dets, thresh_hand, thresh_obj)
 
         misc_toc = time.time()
         nms_time = misc_toc - misc_tic
 
         if webcam_num == -1:
-            sys.stdout.write('im_detect: {:d}/{:d} {:.3f}s {:.3f}s   \r' \
-                            .format(num_images + 1, len(imglist), detect_time, nms_time))
-            sys.stdout.flush()
+            print('im_detect: {:d}/{:d} {:.3f}s {:.3f}s \r'.format(num_images + 1, len(imglist), detect_time, nms_time), end='')
 
         if vis and webcam_num == -1:
-
-            folder_name = args.save_dir
+            folder_name = pred_path # /PID/VID_START_STOP/
             os.makedirs(folder_name, exist_ok=True)
             result_path = os.path.join(folder_name, imglist[num_images][:-4] + "_det.png")
             im2show.save(result_path)
@@ -401,3 +372,89 @@ if __name__ == '__main__':
     if webcam_num >= 0:
         cap.release()
         cv2.destroyAllWindows()
+
+#===========================================================================
+# main fanction
+#===========================================================================
+if __name__ == '__main__':
+
+  args = parse_args()
+
+  # print('Called with args:')
+  # print(args)
+
+  if args.cfg_file is not None:
+    cfg_from_file(args.cfg_file)
+  if args.set_cfgs is not None:
+    cfg_from_list(args.set_cfgs)
+
+  cfg.USE_GPU_NMS = args.cuda
+  np.random.seed(cfg.RNG_SEED)
+
+  # load model
+  model_dir = args.load_dir + "/" + args.net + "_handobj_100K" + "/" + args.dataset
+  if not os.path.exists(model_dir):
+    raise Exception('There is no input directory for loading network from ' + model_dir)
+  load_name = os.path.join(model_dir, 'faster_rcnn_{}_{}_{}.pth'.format(args.checksession, args.checkepoch, args.checkpoint))
+
+  pascal_classes = np.asarray(['__background__', 'targetobject', 'hand'])
+  args.set_cfgs = ['ANCHOR_SCALES', '[8, 16, 32, 64]', 'ANCHOR_RATIOS', '[0.5, 1, 2]']
+
+  # initilize the network here.
+  if args.net == 'vgg16':
+    fasterRCNN = vgg16(pascal_classes, pretrained=False, class_agnostic=args.class_agnostic)
+  elif args.net == 'res101':
+    fasterRCNN = resnet(pascal_classes, 101, pretrained=False, class_agnostic=args.class_agnostic)
+  elif args.net == 'res50':
+    fasterRCNN = resnet(pascal_classes, 50, pretrained=False, class_agnostic=args.class_agnostic)
+  elif args.net == 'res152':
+    fasterRCNN = resnet(pascal_classes, 152, pretrained=False, class_agnostic=args.class_agnostic)
+  else:
+    print("network is not defined")
+    pdb.set_trace()
+
+  fasterRCNN.create_architecture()
+
+  print("load checkpoint %s" % (load_name))
+  if args.cuda > 0:
+    checkpoint = torch.load(load_name)
+  else:
+    checkpoint = torch.load(load_name, map_location=(lambda storage, loc: storage))
+  fasterRCNN.load_state_dict(checkpoint['model'])
+  if 'pooling_mode' in checkpoint.keys():
+    cfg.POOLING_MODE = checkpoint['pooling_mode']
+
+  print('load model successfully!')
+
+  # initilize the tensor holder here.
+  im_data = torch.FloatTensor(1)
+  im_info = torch.FloatTensor(1)
+  num_boxes = torch.LongTensor(1)
+  gt_boxes = torch.FloatTensor(1)
+  box_info = torch.FloatTensor(1)
+
+  # ship to cuda
+  if args.cuda > 0:
+    im_data = im_data.cuda()
+    im_info = im_info.cuda()
+    num_boxes = num_boxes.cuda()
+    gt_boxes = gt_boxes.cuda()
+
+  # load label
+  df = pd.read_pickle(args.label_dir)
+  print('dataframe row = {}'.format(df.shape[0]))
+  for index, item in df.iterrows():
+    dataset_dir = '{}/{}/rgb_frames/{}'.format(args.dataset_dir, item['participant_id'], item['video_id'])
+    pred_dir_pid = '{}/{}'.format(args.pred_dir, item['participant_id'])
+    pred_dir_file = '{}_{}_{}'.format(item['video_id'], item['start_frame'], item['stop_frame'])
+    pred_path = '{}/{}'.format(pred_dir_pid, pred_dir_file)
+
+    if not os.path.exists(pred_dir_pid):
+        os.makedirs(pred_dir_pid)
+    if os.path.exists(pred_path): # 既にpredファイルが作られている(途中から開始)
+        print('Skip {}'.format(pred_dir_file))
+        continue
+    if not os.path.exists(pred_path):
+        os.makedirs(pred_path)
+
+    predict(dataset_dir, pred_path, pred_dir_file, int(item['start_frame']), int(item['stop_frame']), item['video_id'])
