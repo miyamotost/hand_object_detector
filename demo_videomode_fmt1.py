@@ -75,6 +75,7 @@ def parse_args():
                       default="images")
   parser.add_argument('--pred_dir', required=True)
   parser.add_argument('--label_dir', required=True)
+  parser.add_argument('--video_dir', default='')
   parser.add_argument('--cuda', dest='cuda',
                       help='whether use CUDA',
                       action='store_true')
@@ -155,7 +156,7 @@ def _get_image_blob(im):
 
   return blob, np.array(im_scale_factors)
 
-def predict(dataset_dir, pred_path ,start_frame, stop_frame, video_id):
+def predict(dataset_dir, pred_path, video_dir, start_frame, stop_frame, video_id):
   with torch.no_grad():
     if args.cuda > 0:
       cfg.CUDA = True
@@ -168,9 +169,6 @@ def predict(dataset_dir, pred_path ,start_frame, stop_frame, video_id):
     thresh_hand = args.thresh_hand
     thresh_obj = args.thresh_obj
     vis = args.vis
-
-    # print(f'thresh_hand = {thresh_hand}')
-    # print(f'thnres_obj = {thresh_obj}')
 
     webcam_num = args.webcam_num
     # Set up webcam or get image directories
@@ -203,6 +201,12 @@ def predict(dataset_dir, pred_path ,start_frame, stop_frame, video_id):
 
     if args.show_state:
         print('Loaded Photo: {} images.'.format(num_images))
+
+    # start video writer
+    if len(imglist) > 0 and video_dir != '':
+        im = cv2.imread(os.path.join(dataset_dir, imglist[0]))
+        fmt = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
+        writer = cv2.VideoWriter('{}/{}_{}_{}.mp4'.format(args.video_dir, video_id, start_frame, stop_frame), fmt, 60, (im.shape[1], im.shape[0]))
 
     cnt = 0
     pred_list = []
@@ -330,21 +334,7 @@ def predict(dataset_dir, pred_path ,start_frame, stop_frame, video_id):
               if pascal_classes[j] == 'hand':
                 hand_dets = cls_dets.cpu().numpy()
 
-        """
-        if args.analysis:
-          if obj_dets is not None:
-             print('obj_dets', obj_dets.shape)
-             #print(obj_dets)
-          if hand_dets is not None:
-             print('hand_dets', hand_dets.shape)
-             #print(hand_dets)
-        """
-
-        pred_list.append({
-          'frame_index': frame_index,
-          'obj_dets': obj_dets,
-          'hand_dets': hand_dets
-        })
+        pred_list.append({'frame_index': frame_index, 'obj_dets': obj_dets, 'hand_dets': hand_dets})
 
         if vis:
           # visualization
@@ -355,6 +345,11 @@ def predict(dataset_dir, pred_path ,start_frame, stop_frame, video_id):
 
         if webcam_num == -1:
             print('im_detect: {:d}/{:d} {:.3f}s {:.3f}s \r'.format(num_images + 1, len(imglist), detect_time, nms_time), end='')
+
+        if len(imglist) > 0 and video_dir != '':
+            im_out = np.array(im2show)
+            im_out = im_out[:, :, :3]
+            writer.write(im_out)
 
         if vis and webcam_num == -1:
             folder_name = args.save_dir
@@ -370,6 +365,10 @@ def predict(dataset_dir, pred_path ,start_frame, stop_frame, video_id):
             print('Frame rate:', frame_rate)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+
+    # stop video writer
+    if len(imglist) > 0 and video_dir != '':
+        writer.release()
 
     if webcam_num >= 0:
         cap.release()
@@ -432,6 +431,8 @@ if __name__ == '__main__':
 
   print('load model successfully!')
 
+  if args.video_dir != '' and not os.path.exists(args.video_dir):
+    os.makedirs(args.video_dir)
 
   # initilize the tensor holder here.
   im_data = torch.FloatTensor(1)
@@ -462,4 +463,4 @@ if __name__ == '__main__':
         print('Skip {}'.format(pred_file))
         continue
 
-    predict(dataset_dir, pred_path, int(item['start_frame']), int(item['stop_frame']), item['video_id'])
+    predict(dataset_dir, pred_path, args.video_dir, int(item['start_frame']), int(item['stop_frame']), item['video_id'])
